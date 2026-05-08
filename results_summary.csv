@@ -1,0 +1,7 @@
+subject,label,best_band,best_window_sec,best_k,best_accuracy
+s01,valence,delta,0.5,4,0.85
+s01,arousal,gamma,2.0,5,0.875
+s02,valence,theta,1.0,4,0.875
+s02,arousal,alpha,2.0,7,0.9
+s03,valence,theta,0.5,3,0.7
+s03,arousal,beta,2.0,5,0.775
