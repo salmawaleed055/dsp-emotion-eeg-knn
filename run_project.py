@@ -21,12 +21,22 @@ BANDS = {
 }
 WINDOWS_SEC = [0.5, 1.0, 2.0]
 K_VALUES = list(range(1, 11))
+BINARIZATION_LOG = {}
 
 
 def load_subject(mat_path: Path):
     mat = loadmat(mat_path)
     data = mat["data"]  # trials x channels x samples
     labels = mat["labels"]  # trials x 2
+    binarized = False
+    if labels.max() > 1:
+        labels = (labels > 4.5).astype(int)
+        binarized = True
+    BINARIZATION_LOG[mat_path.stem] = binarized
+    if binarized:
+        print(f"{mat_path.stem}: labels binarized at 4.5 (DEAP 1-9 scale -> 0/1)")
+    else:
+        print(f"{mat_path.stem}: labels already binary (0/1), no binarization applied")
     fs = float(np.squeeze(mat["fs"]))
     channel_names = [str(x[0]) if isinstance(x, np.ndarray) else str(x) for x in mat["channel_names"].squeeze()]
     return data, labels, fs, channel_names
@@ -63,7 +73,10 @@ def bandpower(window: np.ndarray, fs: float, band):
     nperseg = min(256, window.shape[1])
     freqs, pxx = welch(window, fs=fs, axis=1, nperseg=nperseg)
     band_mask = (freqs >= low) & (freqs <= high)
-    bp = np.trapezoid(pxx[:, band_mask], freqs[band_mask], axis=1)
+    try:
+        bp = np.trapezoid(pxx[:, band_mask], freqs[band_mask], axis=1)
+    except AttributeError:
+        bp = np.trapz(pxx[:, band_mask], freqs[band_mask], axis=1)
     return bp
 
 
@@ -168,7 +181,51 @@ def plot_accuracy_vs_nk(subject, label_name, detailed_subject, out_dir: Path):
     plt.savefig(out_k, dpi=150)
     plt.close()
 
-    return out_n, out_k
+    # Per-band: Accuracy vs K using best window for each band
+    plt.figure(figsize=(7, 4))
+    for band_name in BANDS:
+        band_dict = detailed_subject["band_only"][band_name]
+        best_window = None
+        best_acc = None
+        for n in n_values:
+            results = band_dict[n][label_name]
+            _, acc = best_k(results)
+            if (best_acc is None) or (acc > best_acc):
+                best_acc = acc
+                best_window = n
+        accs = [band_dict[best_window][label_name][k] for k in K_VALUES]
+        plt.plot(K_VALUES, accs, marker="o", label=band_name)
+    plt.title(f"{subject} {label_name}: Per-Band Accuracy vs K")
+    plt.xlabel("K")
+    plt.ylabel("Accuracy")
+    plt.ylim(0, 1)
+    plt.legend()
+    plt.tight_layout()
+    out_k_bands = out_dir / f"acc_vs_k_bands_{subject}_{label_name}.png"
+    plt.savefig(out_k_bands, dpi=150)
+    plt.close()
+
+    # Per-band: Accuracy vs window length using best K for each band-window
+    plt.figure(figsize=(7, 4))
+    for band_name in BANDS:
+        band_dict = detailed_subject["band_only"][band_name]
+        accs = []
+        for n in n_values:
+            results = band_dict[n][label_name]
+            _, acc = best_k(results)
+            accs.append(acc)
+        plt.plot(WINDOWS_SEC, accs, marker="o", label=band_name)
+    plt.title(f"{subject} {label_name}: Per-Band Accuracy vs Window Length")
+    plt.xlabel("Window Length (s)")
+    plt.ylabel("Accuracy")
+    plt.ylim(0, 1)
+    plt.legend()
+    plt.tight_layout()
+    out_n_bands = out_dir / f"acc_vs_n_bands_{subject}_{label_name}.png"
+    plt.savefig(out_n_bands, dpi=150)
+    plt.close()
+
+    return out_n, out_k, out_n_bands, out_k_bands
 
 
 def features_band_only(data, fs, window_sec, band):
@@ -263,6 +320,7 @@ def main():
 
     psd_paths = []
     acc_plot_paths = []
+    band_plot_paths = []
 
     for mat_path in subjects:
         subj = mat_path.stem
@@ -327,7 +385,14 @@ def main():
 
         # Accuracy vs N and vs K plots
         for label_name in ["valence", "arousal"]:
-            acc_plot_paths.append(plot_accuracy_vs_nk(subj, label_name, detailed[subj], plot_dir))
+            n_path, k_path, n_band_path, k_band_path = plot_accuracy_vs_nk(
+                subj,
+                label_name,
+                detailed[subj],
+                plot_dir,
+            )
+            acc_plot_paths.append((n_path, k_path))
+            band_plot_paths.append((n_band_path, k_band_path))
 
         # Summaries for band-only best per label
         for label_name, label_idx in [("valence", 0), ("arousal", 1)]:
@@ -426,6 +491,28 @@ def main():
     for n_path, k_path in acc_plot_paths:
         report_lines.append(f"- {n_path.as_posix()}")
         report_lines.append(f"- {k_path.as_posix()}")
+    report_lines.append("")
+
+    report_lines.append("## Per-Band Accuracy Plots\n")
+    report_lines.append("- Per-band accuracy vs window length and vs K for each subject/label.")
+    for n_path, k_path in band_plot_paths:
+        report_lines.append(f"- {n_path.as_posix()}")
+        report_lines.append(f"- {k_path.as_posix()}")
+    report_lines.append("")
+
+    report_lines.append("## Notes\n")
+    report_lines.append(
+        "The original DEAP labels are on a 1-9 scale for valence and arousal. "
+        "We binarize at 4.5: values > 4.5 map to High = 1, values <= 4.5 map to Low = 0."
+    )
+    binarized_subjects = sorted([k for k, v in BINARIZATION_LOG.items() if v])
+    if binarized_subjects:
+        report_lines.append(
+            "Runtime binarization was applied for: "
+            f"{', '.join(binarized_subjects)}. Other subjects were already binary."
+        )
+    else:
+        report_lines.append("All loaded .mat files were already binary; no runtime binarization was required.")
 
     report_path = Path("report.md")
     report_path.write_text("\n".join(report_lines), encoding="utf-8")
